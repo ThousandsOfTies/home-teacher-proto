@@ -1,7 +1,7 @@
 import express from 'express'
 import cors from 'cors'
 import dotenv from 'dotenv'
-import { GoogleGenerativeAI } from '@google/generative-ai'
+import { GoogleGenAI } from '@google/genai'
 
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -137,26 +137,23 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 // Google GenAI クライアント初期化
-// Google GenAI クライアント初期化
 // gemini-2.5-flash を使用（速度と精度のバランス重視）
 const MODEL_NAME = process.env.GEMINI_MODEL || 'gemini-2.5-flash'
 console.log(`Using Gemini Model: ${MODEL_NAME}`)
 
-// Initialize the Google Generative AI client
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY || '')
-const model = genAI.getGenerativeModel({ model: MODEL_NAME })
+// Initialize the Google Gen AI client (@google/genai)
+const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' })
 
 // デフォルトモデルID
 const DEFAULT_MODEL_ID = 'gemini-2.5-flash'
 
-// 利用可能なモデル一覧
+// 利用可能なモデル一覧（GA済みモデル優先、Previewは最新のみ）
 const AVAILABLE_MODELS = [
-  { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro (Preview)', description: '最新の最高精度モデル（プレビュー版）' },
+  { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro (Preview)', description: '最新世代・最高精度モデル（プレビュー版）' },
   { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash (Preview)', description: '次世代の高速・高精度モデル（プレビュー版）' },
-  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: '複雑な論理推論に強いハイエンドモデル' },
-  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: '速度と精度のバランスが良いモデル（推奨）' },
-  { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', description: '超高速・低コストだが複雑な推論は苦手なモデル' },
-  { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', description: '安定版の旧高速モデル' },
+  { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', description: '複雑な論理推論に強いハイエンドモデル（GA）' },
+  { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash', description: '速度と精度のバランスが良いモデル（推奨・GA）' },
+  { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', description: '超高速・低コストモデル（GA）' },
 ]
 
 app.get('/api/models', (req, res) => {
@@ -273,18 +270,21 @@ app.post('/api/detect-subject', async (req, res) => {
 
 JSONのみを出力してください。`
 
-    const result = await model.generateContent([
-      {
-        inlineData: {
-          mimeType: imageMime,
-          data: imageData
+    const result = await ai.models.generateContent({
+      model: MODEL_NAME,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: imageMime, data: imageData } },
+            { text: detectionPrompt }
+          ]
         }
-      },
-      { text: detectionPrompt }
-    ])
+      ],
+      config: { thinkingConfig: { thinkingBudget: 0 } }
+    })
 
-    const response = await result.response
-    const responseText = response.text()
+    const responseText = result.text
 
     if (!responseText) {
       throw new Error('Empty response from Gemini')
@@ -348,7 +348,6 @@ app.post('/api/grade-work', async (req, res) => {
 
     // Use requested model or default
     const currentModelName = requestModel || MODEL_NAME
-    const currentModel = requestModel ? genAI.getGenerativeModel({ model: currentModelName }) : model
 
     // 言語設定の確認
     const isJapanese = !language || language.startsWith('ja');
@@ -424,31 +423,32 @@ ${getSubjectSpecificGuidance(subjectId)}
 
 この画像を見て以下のステップで処理してください：
 1. 画像内に含まれる【すべての解答済みの問題】をもれなく特定してください（1問だけではありません）。
-2. 各問題について、問題の形式（記述式、記号選択、または「[   ]に生けてある[   ]」のような穴埋め・抜き出し形式など）を視覚的なレイアウトから正確に把握してください。
+2. 各問題について、問題の形式（記述式、記号選択、穴埋めなど）を視覚的なレイアウトから正確に把握してください。
 3. 生徒の手書き解答を読み取ってください。穴埋め形式の場合は、生徒が書き込んだ言葉が前後の印字されたテキストと合わさって正しい意味を成しているかを確認してください。
 4. 正誤判定をしてください。
-5. 正解とフィードバックを提供してください。
+5. 正解とフィードバックを簡潔に提供してください。
 
 【重要】複数の問題がある場合は、必ず以下の形式のJSONの「配列（Array）」を出力してください。前置きや説明文（jsonコードブロック指定など）は絶対に含めないでください：
-      [
-        {
-          "problemNumber": "問題番号（例: '1(1)', '2(3)'）",
-          "studentAnswer": "生徒の解答（穴埋めの場合は、生徒が書いた部分のみ、または前後の文脈を含めた完成形）",
-          "isCorrect": true または false,
-          "correctAnswer": "正解",
-          "feedback": "問題の意図を踏まえた具体的なフィードバック",
-          "explanation": "解説",
-          "explanationSvg": "解説を補足するSVGコード（必要な場合のみ。不要ならnull）"
-        }
-      ]
+[
+  {
+    "problemNumber": "問題番号（例: '1(1)', '2(3)'）",
+    "studentAnswer": "生徒の解答",
+    "isCorrect": true または false,
+    "correctAnswer": "正解",
+    "feedback": "1〜2文の簡潔なフィードバック（正解なら褒める、不正解なら要点のみ指摘）",
+    "explanation": "3〜5文以内の簡潔な解説。要点のみ。長くしない。",
+    "explanationSvg": "図解SVGコード（図形・グラフ問題のみ。不要ならnull）"
+  }
+]
+
+【簡潔さの原則】
+・feedbackは1〜2文以内。正解時は「正解です！〇〇を正しく使えています。」程度。
+・explanationは3〜5文以内。核心的な考え方のみ述べる。詳細な場合分けや複数の解法は不要。
+・SVGは図形・グラフ・数直線など視覚的補助が明確に必要な場合のみ生成。文章で十分な場合はnull。
 
 【SVG生成ルール】（必要な場合のみ）
-・解説に図解（図形、グラフ、数直線など）があると分かりやすい場合は、シンプルなSVGコードを生成してください。
-・複数の図が必要な場合は、1つのSVG内にレイアウト（左右や上下に配置）してまとめてください。
-・解説テキスト内では「図の左側」「図の右側」のように参照してください。
-・SVGタグのみを含めてください（xmlコードブロック指定などは不要）。
-・レスポンシブに表示できるよう、width/height属性は指定せず、viewBoxを適切に設定してください。
-・色は #333 (黒), #e74c3c (赤/強調), #3498db (青/補助) などを使い分けてください。
+・SVGタグのみ（xmlコードブロック指定不要）。width/height属性なし、viewBoxのみ。
+・色は #333 (黒), #e74c3c (赤/強調), #3498db (青/補助) を使い分け。
 
 JSONのみを出力してください。「はい」「承知しました」などの前置きは不要です。`;
     } else {
@@ -458,29 +458,30 @@ ${getSubjectSpecificGuidance(subjectId)}
 
 Please analyze this image by following these steps:
 1. Identify ALL answered problems in the image (do not stop at just one).
-2. Understand the format of the question by looking at the visual layout (e.g., fill-in-the-blanks where the student writes inside printed text frames, multiple choice, or free text).
-3. Recognize the student's handwritten answer. If it's a fill-in-the-blank, evaluate if the handwritten word correctly completes the printed sentence.
-4. Determine if the answer is correct provided the context.
-5. Provide the correct answer and feedback.
+2. Understand the format of each question from the visual layout (fill-in-the-blank, multiple choice, free text, etc.).
+3. Recognize the student's handwritten answer. For fill-in-the-blank, check if the handwritten word correctly completes the printed sentence.
+4. Determine if the answer is correct.
+5. Provide concise feedback and explanation.
 
-【IMPORTANT】Output ONLY a JSON ARRAY in the following format. Do NOT include any introductory text or markdowns:
+【IMPORTANT】Output ONLY a JSON ARRAY. No introductory text or markdown:
 [
   {
     "problemNumber": "Problem Number (e.g., '1(1)', '2(3)')",
     "studentAnswer": "Student's Answer",
     "isCorrect": true or false,
     "correctAnswer": "Correct Answer",
-    "feedback": "Specific, encouraging feedback",
-    "explanation": "Explanation",
-    "explanationSvg": "SVG code if helpful (optional, null if not needed)"
+    "feedback": "1-2 sentences max. Praise if correct, briefly note the key point if wrong.",
+    "explanation": "3-5 sentences max. Key concept only. Do not list multiple approaches.",
+    "explanationSvg": "SVG code only if a diagram genuinely helps (geometry/graphs). null otherwise."
   }
 ]
 
-【SVG Rules】(Optional)
-- Generate simple SVG code if diagrams (shapes, graphs, etc.) help explain.
-- No xml tags. Just the SVG tag.
-- Do not specify width/height, use viewBox.
-- Use colors like #333 (black), #e74c3c (red/emphasis), #3498db (blue/secondary).
+【Brevity Rules】
+- feedback: 1-2 sentences. For correct answers: "Great job! You correctly applied [concept]."
+- explanation: 3-5 sentences. Core idea only. No exhaustive case analysis.
+- SVG: only for geometry, graphs, or number lines. null if text suffices.
+
+【SVG Rules】SVG tag only (no xml block). No width/height, use viewBox. Colors: #333, #e74c3c, #3498db.
 
 Output ONLY JSON. No introductory text.`;
     }
@@ -490,18 +491,24 @@ Output ONLY JSON. No introductory text.`;
     const cropData = cropMatch ? cropMatch[3] : croppedImageData.replace(/^data:image\/\w+;base64,/, '')
     const cropMime = cropMatch ? cropMatch[1] : 'image/jpeg'
 
-    const result = await currentModel.generateContent([
-      {
-        inlineData: {
-          mimeType: cropMime,
-          data: cropData
+    const result = await ai.models.generateContent({
+      model: currentModelName,
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: cropMime, data: cropData } },
+            { text: simplePrompt }
+          ]
         }
-      },
-      { text: simplePrompt }
-    ])
+      ],
+      config: {
+        // Disable thinking mode for faster responses (2.5-flash thinks by default)
+        thinkingConfig: { thinkingBudget: 0 }
+      }
+    })
 
-    const response = await result.response
-    const responseText = response.text()
+    const responseText = result.text
 
     if (!responseText) {
       throw new Error('Empty response from Gemini')
